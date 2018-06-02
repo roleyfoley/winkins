@@ -1,7 +1,11 @@
+# escape=` 
+# Escape as backtick for windows folder parth consistency 
+
 FROM openjdk:8-windowsservercore-1709
 
+SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue';"]
+
 ARG user=jenkins
-ARG group=jenkins
 ARG http_port=8080
 ARG agent_port=50000
 ARG JENKINS_HOME="C:/Program Files/Jenkins/jenkins_home"
@@ -9,30 +13,20 @@ ARG JENKINS_HOME="C:/Program Files/Jenkins/jenkins_home"
 ENV JENKINS_HOME $JENKINS_HOME
 ENV JENKINS_SLAVE_AGENT_PORT ${agent_port}
 
-# Jenkins is run with user `jenkins`, uid = 1000
+# Jenkins is run with user `jenkins`
 # If you bind mount a volume from the host or a data container,
 # ensure you use the same uid
-RUN powershell.exe \
-    New-LocalUser \
-        -Name $ENV:user \
-        -Description "Jenkins Account" \
-        -NoPassword ;\
-    New-LocalGroup \
-        -Name $ENV:group \
-        -Description "Jenkins" ; \
-    Add-LocalGroupMember \
-        -Group $Env:group \
-        -Member $Env:user
-
+RUN NET USER $ENV:user /add
 
 # Jenkins home directory is a volume, so configuration and build history
 # can be persisted and survive image upgrades
 VOLUME $JENKINS_HOME
 
-# `/usr/share/jenkins/ref/` contains all reference configuration we want
+# `C:\Program Files\Jenkins\ref\` contains all reference configuration we want
 # to set on a fresh new installation. Use it to bundle additional plugins
 # or config file with your custom jenkins Docker image.
-RUN powershell.exe New-Item -ItemType Directory -Path "C:/Program Files/Jenkins/ref/init.groovy.d"
+RUN @( 'C:/Program Files/Jenkins/ref/init.groovy.d', 'C:/Program Files/Jenkins/ref/bin' ) | `
+    ForEach-Object ${ New-Item -ItemType Directory -Path $_ }
 
 COPY [ "init.groovy", "C:/Program Files/Jenkins/ref/init.groovy.d/tcp-slave-agent-port.groovy" ]
 
@@ -48,25 +42,12 @@ ARG JENKINS_URL=https://repo.jenkins-ci.org/public/org/jenkins-ci/main/jenkins-w
 
 # could use ADD but this one does not check Last-Modified header neither does it allow to control checksum
 # see https://github.com/docker/docker/issues/8331
-RUN powershell.exe -Command \
-  $ErrorActionPreference = 'Stop'; \
-  $ProgressPreference = 'SilentlyContinue'; \
-  Invoke-WebRequest $ENV:JENKINS_URL -OutFile "C:/Program Files/Jenkins/jenkins.war"; \
-  $Hash = Get-FileHash -Algorithm SHA256 -Path "C:/Program Files/Jenkins/jenkins.war"; \
-  if ( $Hash -ne $ENV:JENKINS_SHA  ) { write-Error "Jenkns File does not match expected has " -ErrorAction Stop }
-
+RUN Invoke-WebRequest $ENV:JENKINS_URL -OutFile 'C:/Program Files/Jenkins/jenkins.war'; `
+  $Hash = Get-FileHash -Algorithm SHA256 -Path 'C:/Program Files/Jenkins/jenkins.war'; `
+  if ( $Hash.Hash -ne $ENV:JENKINS_SHA ) { write-Error 'Jenkns File does not match expected hash' }
 
 ENV JENKINS_UC https://updates.jenkins.io
 ENV JENKINS_UC_EXPERIMENTAL=https://updates.jenkins.io/experimental
-
-RUN powershell.exe -Command \ 
-    [ $ENV:JENKINS_HOME, "C:/Program Files/Jenkins/ref/", "C:/Program Files/Jenkins/bin" ] | For-EachObject { \
-        $acl = Get-Acl $_; \
-        $permission = $ENV:user,"FullControl","Allow"; \
-        $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule $permission \
-        $acl.SetAccessRule($accessRule) \ 
-        $acl | Set-Acl $_ \
-    }
 
 # for main web interface:
 EXPOSE ${http_port}
@@ -76,12 +57,25 @@ EXPOSE ${agent_port}
 
 ENV COPY_REFERENCE_FILE_LOG $JENKINS_HOME/copy_reference_file.log
 
-USER ${user}
-
 COPY [ "jenkins-support.ps1", "C:/Program Files/Jenkins/bin/jenkins-support.ps1" ]
 COPY [ "jenkins.ps1", "C:/Program Files/Jenkins/bin/jenkins.ps1" ]
 
-ENTRYPOINT ["C:/Program Files/Jenkins/bin/jenkins.ps1"]
-
-# from a derived Dockerfile, can use `RUN plugins.sh active.txt` to setup /usr/share/jenkins/ref/plugins from a support bundle
+# from a derived Dockerfile, can use `RUN install-plugins.sh plugins.txt` to setup C:\Program Files\Jenkins\ref\plugins from a support bundle
 COPY [ "install-plugins.ps1", "C:/Program Files/Jenkins/bin/install-plugins.ps1" ]
+
+RUN @( $ENV:JENKINS_HOME, 'C:/Program Files/Jenkins/ref', 'C:/Program Files/Jenkins/bin' ) | ForEach-Object { `
+        $acl = Get-Acl $_; `
+        $permission = $ENV:user,'FullControl','Allow'; `
+        $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule $permission; `
+        $acl.SetAccessRule($accessRule); `
+        $acl | Set-Acl $_ `
+    }
+
+RUN $newPath = ('{0}\bin;{1}' -f 'C:\Program Files\Jenkins', $env:PATH); `
+	Write-Host ('Updating PATH: {0}' -f $newPath); `
+    # Nano Server does not have "[Environment]::SetEnvironmentVariable()"
+    setx /M PATH $newPath;
+
+USER ${user}
+
+ENTRYPOINT powershell -File 'C:/Program Files/Jenkins/bin/jenkins.ps1' 
